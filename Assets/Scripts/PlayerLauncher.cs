@@ -2,42 +2,46 @@ using System.Collections;
 using UnityEngine;
 
 /// <summary>
-/// Voice-controlled launcher. The player waits (no physics) at a random X on screen with Y = 0.
-/// Say an angle (0 = right, counterclockwise), then a power, then confirm with "yes".
-/// The player is then launched with an impulse and leaves a trail.
-/// Score: points build up for every moment the player is airborne without touching anything.
-/// Out of bounds: score for the round is 0 and the player returns to the same spot immediately.
-/// Hitting the target circle: explosion, "WIN", then after a short pause a new random spot.
+/// Voice-controlled launcher. The player (a square with a heavier circle on top, one Rigidbody2D)
+/// waits with no physics at its level's start position. Say an angle (0 = right, counterclockwise),
+/// a power, then confirm with "yes". The impulse is applied at the square's origin, so the heavier
+/// head makes the player tumble. Points build up for every moment it flies without touching anything.
+/// Out of bounds: the round's score is 0 and the player returns to its start immediately.
+/// Hitting the target raises <see cref="Won"/>; the <see cref="GameManager"/> decides what happens next.
 /// </summary>
 [RequireComponent(typeof(Rigidbody2D))]
 public class PlayerLauncher : MonoBehaviour
 {
-    private enum State { WaitingForAngle, WaitingForPower, WaitingForConfirm, Flying, Celebrating }
+    private enum State { WaitingForAngle, WaitingForPower, WaitingForConfirm, Flying, Won }
+
+    /// <summary>Raised with the round's score when the player hits the target.</summary>
+    public event System.Action<int> Won;
 
     [Header("References")]
-    [Tooltip("Speech source. Found automatically if left empty.")]
-    [SerializeField] private MicrophoneSpeechListener speech;
     [Tooltip("Camera that defines the visible area. Defaults to Main Camera.")]
     [SerializeField] private Camera targetCamera;
-    [Tooltip("Score text. Found automatically if left empty.")]
+    [Tooltip("Live score display. Found automatically if left empty.")]
     [SerializeField] private ScoreBoard scoreBoard;
-    [Tooltip("Particle effect spawned when the player hits the target.")]
-    [SerializeField] private GameObject explosionPrefab;
-
-    [Header("Spawning")]
-    [Tooltip("Gap between the player and the left/right screen edges when picking a spawn X.")]
-    [SerializeField] private float edgeMargin = 0.5f;
-    [Tooltip("Pause after hitting the target before the player respawns.")]
-    [SerializeField] private float winRespawnDelay = 2f;
+    [Tooltip("Where the launch impulse is applied: the square's origin.")]
+    [SerializeField] private Transform forcePoint;
 
     [Header("Launch")]
-    [Tooltip("Impulse = power x this multiplier (x mass), so speed in units/sec roughly equals power.")]
+    [Tooltip("Impulse = power x this multiplier x total mass, so launch speed in units/sec roughly equals power.")]
     [SerializeField] private float powerMultiplier = 1f;
     [SerializeField] private float maxPower = 100f;
 
     [Header("Score")]
     [Tooltip("Points earned per second of flight while not touching anything.")]
     [SerializeField] private float pointsPerSecond = 100f;
+
+    [Header("Impact")]
+    [Tooltip("Cinematic played on hit. Found on the main camera if left empty.")]
+    [SerializeField] private ImpactCamera impactCamera;
+    [Tooltip("Slow motion kicks in when the player is about to reach the target within this many seconds.")]
+    [SerializeField] private float slowMoLookahead = 0.3f;
+    [Tooltip("Game speed during the slow motion just before impact.")]
+    [Range(0.05f, 1f)]
+    [SerializeField] private float slowMoScale = 0.2f;
 
     [Header("Out of bounds")]
     [Tooltip("How far past the screen edge the player may go before it counts as out of bounds. " +
@@ -57,41 +61,34 @@ public class PlayerLauncher : MonoBehaviour
     private float stillTimer;
     private float roundScore;
     private int contactCount;
+    private bool slowMo;
+    private float defaultFixedDeltaTime;
+    private readonly RaycastHit2D[] castHits = new RaycastHit2D[8];
+    private ContactFilter2D triggerFilter;
 
     private void Awake()
     {
         body = GetComponent<Rigidbody2D>();
-        colliders = GetComponents<Collider2D>();
-        renderers = GetComponentsInChildren<Renderer>();
+        colliders = GetComponentsInChildren<Collider2D>(true);
+        renderers = GetComponentsInChildren<Renderer>(true);
         trail = GetComponent<TrailRenderer>();
+        if (forcePoint == null) forcePoint = transform;
         if (targetCamera == null) targetCamera = Camera.main;
-        if (speech == null) speech = FindFirstObjectByType<MicrophoneSpeechListener>();
         if (scoreBoard == null) scoreBoard = FindFirstObjectByType<ScoreBoard>();
+        if (impactCamera == null && targetCamera != null) impactCamera = targetCamera.GetComponent<ImpactCamera>();
+        defaultFixedDeltaTime = Time.fixedDeltaTime;
+        triggerFilter = new ContactFilter2D { useTriggers = true };
+        spawnPosition = transform.position;
+        Freeze();
     }
 
-    private void OnEnable()
-    {
-        if (speech != null) speech.PhraseRecognized += HandlePhrase;
-    }
+    /// <summary>Start position for the current level.</summary>
+    public void SetSpawn(Vector2 position) => spawnPosition = new Vector3(position.x, position.y, 0f);
 
-    private void OnDisable()
-    {
-        if (speech != null) speech.PhraseRecognized -= HandlePhrase;
-    }
-
-    private void Start()
-    {
-        if (speech == null)
-            Debug.LogWarning("[Launcher] No MicrophoneSpeechListener in the scene; voice commands won't work.");
-
-        spawnPosition = PickSpawnPosition();
-        ResetToSpawn();
-    }
-
-    /// <summary>Feed recognized speech in. Public so it can also be driven by tests or other input.</summary>
+    /// <summary>Feed recognized speech in (the GameManager forwards it here).</summary>
     public void HandlePhrase(string text)
     {
-        if (state == State.Flying || state == State.Celebrating) return;
+        if (state == State.Flying || state == State.Won) return;
 
         var numbers = SpokenNumbers.Extract(text);
 
@@ -179,7 +176,9 @@ public class PlayerLauncher : MonoBehaviour
         body.bodyType = RigidbodyType2D.Dynamic;
         body.linearVelocity = Vector2.zero;
         body.angularVelocity = 0f;
-        body.AddForce(direction * pendingPower * powerMultiplier * body.mass, ForceMode2D.Impulse);
+        // Applied at the square's origin, not the center of mass (which sits higher, toward the heavy circle).
+        body.AddForceAtPosition(direction * pendingPower * powerMultiplier * body.mass,
+                                forcePoint.position, ForceMode2D.Impulse);
 
         if (trail != null)
         {
@@ -214,60 +213,108 @@ public class PlayerLauncher : MonoBehaviour
 
         stillTimer = body.linearVelocity.sqrMagnitude < 0.01f ? stillTimer + Time.fixedDeltaTime : 0f;
         if (stillTimer >= stuckSeconds)
+        {
             EndRoundWithoutWin("Stopped without reaching the target. Score reset to 0. Back to the start.");
+            return;
+        }
+
+        SetSlowMotion(IsAboutToHitTarget());
     }
 
+    /// <summary>Sweeps the player's shapes along its velocity to see if the target is just ahead.</summary>
+    private bool IsAboutToHitTarget()
+    {
+        Vector2 v = body.linearVelocity;
+        float speed = v.magnitude;
+        if (speed < 0.01f) return false;
+
+        // Lookahead is in real seconds, so it doesn't shrink once the game is slowed down.
+        float distance = speed * slowMoLookahead;
+        int count = body.Cast(v / speed, triggerFilter, castHits, distance);
+        for (int i = 0; i < count; i++)
+            if (castHits[i].collider.GetComponent<Target>() != null) return true;
+        return false;
+    }
+
+    private void SetSlowMotion(bool on)
+    {
+        if (slowMo == on) return;
+        slowMo = on;
+        Time.timeScale = on ? slowMoScale : 1f;
+        Time.fixedDeltaTime = defaultFixedDeltaTime * Time.timeScale; // keep physics smooth while slowed
+    }
+
+    private void OnDisable()
+    {
+        if (slowMo) SetSlowMotion(false);
+    }
+
+    // Collisions from the square or the circle both arrive here (they share this Rigidbody2D).
     private void OnCollisionEnter2D(Collision2D collision) => contactCount++;
     private void OnCollisionExit2D(Collision2D collision) => contactCount = Mathf.Max(0, contactCount - 1);
 
-    /// <summary>
-    /// Called by the target circle when this player touches it. (Done from the circle's side because the
-    /// circle hides itself on contact, which would stop Unity from sending the player its own trigger event.)
-    /// </summary>
-    public void NotifyHitTarget()
+    /// <summary>Called by the <see cref="Target"/> when this player touches it.</summary>
+    public void NotifyHitTarget(Collider2D targetCollider)
     {
         if (state != State.Flying) return;
-        StartCoroutine(WinRoutine());
+
+        state = State.Won;
+        int score = Mathf.FloorToInt(roundScore);
+        StartCoroutine(HitRoutine(score, ContactPoint(targetCollider)));
     }
 
-    private IEnumerator WinRoutine()
+    private IEnumerator HitRoutine(int score, Vector2 contactPoint)
     {
-        state = State.Celebrating;
-        int score = Mathf.FloorToInt(roundScore);
-        scoreBoard?.SetLast(score);
-        scoreBoard?.SetCurrent(null);
-        Debug.Log($"WIN (score {score})");
+        SetSlowMotion(false);
 
-        if (explosionPrefab != null)
-            Instantiate(explosionPrefab, transform.position, Quaternion.identity);
+        // Freeze-frame + zoom on the impact point while both objects are still visible.
+        if (impactCamera != null)
+            yield return impactCamera.Play(contactPoint);
 
-        // Hide and freeze the player during the pause.
         Freeze();
         SetVisible(false);
         if (trail != null) trail.emitting = false;
+        Won?.Invoke(score);
+    }
 
-        yield return new WaitForSeconds(winRespawnDelay);
+    /// <summary>Where the player and the target touch: the closest points between their shapes.</summary>
+    private Vector2 ContactPoint(Collider2D targetCollider)
+    {
+        Vector2 best = targetCollider != null ? (Vector2)targetCollider.bounds.center : body.worldCenterOfMass;
+        if (targetCollider == null) return best;
 
-        spawnPosition = PickSpawnPosition();
-        SetVisible(true);
-        ResetToSpawn();
+        float bestDistance = float.MaxValue;
+        foreach (var c in colliders)
+        {
+            if (!c.enabled) continue;
+            var d = Physics2D.Distance(c, targetCollider);
+            if (d.isValid && d.distance < bestDistance)
+            {
+                bestDistance = d.distance;
+                best = (d.pointA + d.pointB) * 0.5f;
+            }
+        }
+        return best;
     }
 
     private void EndRoundWithoutWin(string message)
     {
         roundScore = 0f;
-        scoreBoard?.SetLast(0);
-        scoreBoard?.SetCurrent(null);
+        scoreBoard?.SetCurrent(0);
         Debug.Log($"[Launcher] {message}");
         ResetToSpawn(); // immediate, no pause
     }
 
-    private void ResetToSpawn()
+    /// <summary>Put the player back at its start position, upright and frozen, and ask for an angle.</summary>
+    public void ResetToSpawn()
     {
+        StopAllCoroutines();
+        SetSlowMotion(false);
         Freeze();
         transform.SetPositionAndRotation(spawnPosition, Quaternion.identity);
         body.position = spawnPosition;
         body.rotation = 0f;
+        SetVisible(true);
         if (trail != null)
         {
             trail.emitting = false;
@@ -290,14 +337,6 @@ public class PlayerLauncher : MonoBehaviour
         foreach (var r in renderers)
             if (r != trail) r.enabled = visible;
         foreach (var c in colliders) c.enabled = visible;
-    }
-
-    private Vector3 PickSpawnPosition()
-    {
-        float halfWidth = targetCamera.orthographicSize * targetCamera.aspect;
-        float camX = targetCamera.transform.position.x;
-        float x = Random.Range(camX - halfWidth + edgeMargin, camX + halfWidth - edgeMargin);
-        return new Vector3(x, 0f, 0f);
     }
 
     private bool IsOutOfBounds(Vector3 p)

@@ -2,13 +2,14 @@ using TMPro;
 using UnityEngine;
 
 /// <summary>
-/// Shows the last round's score, plus the live score while the player is in the air.
+/// Top-left HUD: current level, the live score for this attempt, and each level's saved score.
 /// </summary>
 public class ScoreBoard : MonoBehaviour
 {
     [SerializeField] private TMP_Text label;
 
-    private int lastScore;
+    private string levelLine = "";
+    private string savedScores = "";
     private int? currentScore;
 
     private void Awake()
@@ -17,13 +18,14 @@ public class ScoreBoard : MonoBehaviour
         Refresh();
     }
 
-    public void SetLast(int score)
+    public void SetLevelInfo(string level, string scores)
     {
-        lastScore = score;
+        levelLine = level;
+        savedScores = scores;
         Refresh();
     }
 
-    /// <summary>Live score during flight; null hides it.</summary>
+    /// <summary>Live score during flight; null shows 0.</summary>
     public void SetCurrent(int? score)
     {
         if (currentScore == score) return;
@@ -34,8 +36,6 @@ public class ScoreBoard : MonoBehaviour
     private void Refresh()
     {
         if (label == null) return;
-        label.text = currentScore.HasValue
-            ? $"Last Score: {lastScore}\nScore: {currentScore.Value}"
-            : $"Last Score: {lastScore}";
+        label.text = $"{levelLine}\nScore: {currentScore ?? 0}\n\n<size=75%>{savedScores}</size>";
     }
 }

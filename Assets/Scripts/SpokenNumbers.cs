@@ -94,6 +94,11 @@ public static class SpokenNumbers
     }
 
     public static bool IsYes(string text) => ContainsWord(text, "yes", "yeah", "yep", "yup", "sure", "correct", "affirmative", "launch", "fire", "go", "ok", "okay");
+    /// <summary>"Retry", "re-try", "try again", "restart", "reset".</summary>
+    public static bool IsRetry(string text) =>
+        !string.IsNullOrEmpty(text) &&
+        Regex.IsMatch(text.ToLowerInvariant(), @"\bre[\s-]?try|\btry again\b|\brestart\b|\breset\b|\breplay\b");
+
     public static bool IsNo(string text) => ContainsWord(text, "no", "nope", "nah", "wrong", "cancel", "incorrect");
 
     private static bool ContainsWord(string text, params string[] words)
