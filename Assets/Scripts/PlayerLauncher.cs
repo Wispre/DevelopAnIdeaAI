@@ -43,6 +43,22 @@ public class PlayerLauncher : MonoBehaviour
     [Range(0.05f, 1f)]
     [SerializeField] private float slowMoScale = 0.2f;
 
+    [Header("Approach")]
+    [Tooltip("The target the player shrinks toward. Found automatically if left empty.")]
+    [SerializeField] private Target target;
+    [Tooltip("Player scale when it reaches the target's surface (1 = normal size at launch distance).")]
+    [Range(0.05f, 1f)]
+    [SerializeField] private float minScale = 0.35f;
+
+    [Header("Landing")]
+    [Tooltip("Distance from the player's origin (torso center) down to the soles of the boots, at scale 1.")]
+    [SerializeField] private float feetOffset = 0.80f;
+    [Tooltip("How far out from straight up the arms are raised when cheering (degrees).")]
+    [SerializeField] private float cheerAngle = 28f;
+    [Tooltip("How much the arms pump up and down while cheering (degrees).")]
+    [SerializeField] private float cheerWave = 12f;
+    [SerializeField] private float cheerSpeed = 7f;
+
     [Header("Out of bounds")]
     [Tooltip("How far past the screen edge the player may go before it counts as out of bounds. " +
              "Going above the top is allowed, since gravity brings it back.")]
@@ -52,7 +68,6 @@ public class PlayerLauncher : MonoBehaviour
 
     private Rigidbody2D body;
     private Collider2D[] colliders;
-    private Renderer[] renderers;
     private TrailRenderer trail;
     private Vector3 spawnPosition;
     private State state;
@@ -65,12 +80,22 @@ public class PlayerLauncher : MonoBehaviour
     private float defaultFixedDeltaTime;
     private readonly RaycastHit2D[] castHits = new RaycastHit2D[8];
     private ContactFilter2D triggerFilter;
+    private Vector3 baseScale;
+    private float launchDistance;
+
+    // Arm parts and their normal (arms down) pose, so the cheer pose can be undone.
+    private struct Pose { public Transform t; public Vector3 pos; public Quaternion rot; }
+    private Pose armL, armR, gloveL, gloveR;
 
     private void Awake()
     {
+        baseScale = transform.localScale;
+        if (target == null) target = FindFirstObjectByType<Target>(FindObjectsInactive.Include);
+        armL = Capture("Arm L"); armR = Capture("Arm R");
+        gloveL = Capture("Glove L"); gloveR = Capture("Glove R");
+
         body = GetComponent<Rigidbody2D>();
         colliders = GetComponentsInChildren<Collider2D>(true);
-        renderers = GetComponentsInChildren<Renderer>(true);
         trail = GetComponent<TrailRenderer>();
         if (forcePoint == null) forcePoint = transform;
         if (targetCamera == null) targetCamera = Camera.main;
@@ -189,6 +214,7 @@ public class PlayerLauncher : MonoBehaviour
         stillTimer = 0f;
         roundScore = 0f;
         contactCount = 0;
+        launchDistance = target != null ? Vector2.Distance(transform.position, target.transform.position) : 0f;
         scoreBoard?.SetCurrent(0);
         state = State.Flying;
         Debug.Log($"[Launcher] Launched at {Format(pendingAngle)}° with {Format(pendingPower)} power!");
@@ -203,6 +229,8 @@ public class PlayerLauncher : MonoBehaviour
             EndRoundWithoutWin("Out of bounds. Score reset to 0. Back to the start.");
             return;
         }
+
+        UpdateApproachScale();
 
         // Airtime score: only while not touching anything.
         if (contactCount == 0)
@@ -260,10 +288,10 @@ public class PlayerLauncher : MonoBehaviour
 
         state = State.Won;
         int score = Mathf.FloorToInt(roundScore);
-        StartCoroutine(HitRoutine(score, ContactPoint(targetCollider)));
+        StartCoroutine(HitRoutine(score, ContactPoint(targetCollider), targetCollider));
     }
 
-    private IEnumerator HitRoutine(int score, Vector2 contactPoint)
+    private IEnumerator HitRoutine(int score, Vector2 contactPoint, Collider2D targetCollider)
     {
         SetSlowMotion(false);
 
@@ -272,9 +300,86 @@ public class PlayerLauncher : MonoBehaviour
             yield return impactCamera.Play(contactPoint);
 
         Freeze();
-        SetVisible(false);
+        SetCollidersEnabled(false);
         if (trail != null) trail.emitting = false;
+        LandOn(targetCollider, contactPoint);
+        StartCoroutine(Cheer());
         Won?.Invoke(score);
+    }
+
+    /// <summary>
+    /// Shrinks the player as it closes in on the target: normal size at launch distance,
+    /// <see cref="minScale"/> when touching the target's surface. Grows back if it moves away.
+    /// </summary>
+    private void UpdateApproachScale()
+    {
+        if (target == null || launchDistance <= 0f) return;
+        float surface = TargetRadius();
+        float d = Vector2.Distance(transform.position, target.transform.position);
+        float t = Mathf.InverseLerp(surface, Mathf.Max(launchDistance, surface + 0.01f), d);
+        transform.localScale = baseScale * Mathf.Lerp(minScale, 1f, t);
+    }
+
+    private float TargetRadius()
+    {
+        var circle = target != null ? target.GetComponent<CircleCollider2D>() : null;
+        return circle != null ? circle.radius * Mathf.Abs(circle.transform.lossyScale.x) : 0.5f;
+    }
+
+    /// <summary>Stand the player on the planet: boots on the surface, head pointing away from its center.</summary>
+    private void LandOn(Collider2D targetCollider, Vector2 contactPoint)
+    {
+        Vector2 center = targetCollider != null ? (Vector2)targetCollider.transform.position : contactPoint;
+        Vector2 up = contactPoint - center;
+        up = up.sqrMagnitude > 1e-6f ? up.normalized : Vector2.up;
+
+        float scale = transform.localScale.y / baseScale.y;
+        float radius = TargetRadius();
+        Vector2 position = center + up * (radius + feetOffset * scale * baseScale.y);
+        float angle = Mathf.Atan2(up.y, up.x) * Mathf.Rad2Deg - 90f;
+
+        transform.SetPositionAndRotation(position, Quaternion.Euler(0f, 0f, angle));
+        body.position = position;
+        body.rotation = angle;
+    }
+
+    /// <summary>Arms up in a V, pumping up and down, until the player is reset.</summary>
+    private IEnumerator Cheer()
+    {
+        for (float time = 0f; ; time += Time.deltaTime)
+        {
+            float a = cheerAngle + Mathf.Sin(time * cheerSpeed) * cheerWave * 0.5f;
+            RaiseArm(armL, gloveL, -1f, a);
+            RaiseArm(armR, gloveR, +1f, a);
+            yield return null;
+        }
+    }
+
+    // Rotate an arm about its shoulder (top of the arm in the normal pose) so it points up and outward.
+    private static void RaiseArm(Pose arm, Pose glove, float side, float degreesFromVertical)
+    {
+        if (arm.t == null) return;
+        float length = arm.t.localScale.y;
+        Vector3 shoulder = arm.pos + Vector3.up * (length * 0.5f);
+        float r = degreesFromVertical * Mathf.Deg2Rad;
+        var dir = new Vector3(side * Mathf.Sin(r), Mathf.Cos(r), 0f);
+
+        arm.t.localPosition = shoulder + dir * (length * 0.5f);
+        arm.t.localRotation = Quaternion.Euler(0f, 0f, -side * degreesFromVertical);
+        if (glove.t != null) glove.t.localPosition = shoulder + dir * (length + 0.02f);
+    }
+
+    private Pose Capture(string childName)
+    {
+        var t = transform.Find(childName);
+        return t == null ? default : new Pose { t = t, pos = t.localPosition, rot = t.localRotation };
+    }
+
+    private static void Restore(Pose p)
+    {
+        if (p.t == null) return;
+        p.t.localPosition = p.pos;
+        p.t.localRotation = p.rot;
     }
 
     /// <summary>Where the player and the target touch: the closest points between their shapes.</summary>
@@ -312,9 +417,11 @@ public class PlayerLauncher : MonoBehaviour
         SetSlowMotion(false);
         Freeze();
         transform.SetPositionAndRotation(spawnPosition, Quaternion.identity);
+        transform.localScale = baseScale;
         body.position = spawnPosition;
         body.rotation = 0f;
-        SetVisible(true);
+        Restore(armL); Restore(armR); Restore(gloveL); Restore(gloveR);
+        SetCollidersEnabled(true);
         if (trail != null)
         {
             trail.emitting = false;
@@ -332,11 +439,9 @@ public class PlayerLauncher : MonoBehaviour
         body.angularVelocity = 0f;
     }
 
-    private void SetVisible(bool visible)
+    private void SetCollidersEnabled(bool enabled)
     {
-        foreach (var r in renderers)
-            if (r != trail) r.enabled = visible;
-        foreach (var c in colliders) c.enabled = visible;
+        foreach (var c in colliders) c.enabled = enabled;
     }
 
     private bool IsOutOfBounds(Vector3 p)

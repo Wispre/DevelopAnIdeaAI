@@ -19,7 +19,6 @@ public class GameManager : MonoBehaviour
     [SerializeField] private ScoreBoard scoreBoard;
     [SerializeField] private TMP_Text winMessage;
     [SerializeField] private TMP_Text continuePrompt;
-    [SerializeField] private GameObject explosionPrefab;
 
     [Header("Win screen")]
     [SerializeField] private string winText = "Ayy, I see what you did there :)";
@@ -113,9 +112,7 @@ public class GameManager : MonoBehaviour
         showingWin = true;
         awaitingChoice = false;
 
-        if (explosionPrefab != null)
-            Instantiate(explosionPrefab, target.transform.position, Quaternion.identity);
-        target.Hide();
+        // No explosion: the player has landed on the planet and is cheering (see PlayerLauncher).
 
         ScoreRecords.RecordWin(Current, levelIndex, score);
         RefreshScoreBoard();
