@@ -25,7 +25,7 @@ public class CircleSpawner : MonoBehaviour
     [Header("Respawn")]
     [SerializeField] private string playerTag = "Player";
     [Tooltip("How long the circle stays hidden before reappearing.")]
-    [SerializeField] private float respawnDelay = 0.5f;
+    [SerializeField] private float respawnDelay = 2f;
 
     private SpawnedCircle circle;
 
