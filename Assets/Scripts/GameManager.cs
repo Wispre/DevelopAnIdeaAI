@@ -26,6 +26,12 @@ public class GameManager : MonoBehaviour
     [Tooltip("Seconds between the win message and the continue question.")]
     [SerializeField] private float promptDelay = 1f;
 
+    [Header("End of the game")]
+    [Tooltip("Scene shown after the last level is won.")]
+    [SerializeField] private string endGameScene = "EndGame";
+    [Tooltip("Seconds the 'all levels done' message stays before the end scene loads.")]
+    [SerializeField] private float endGameDelay = 2f;
+
     private int levelIndex;
     private bool showingWin;
     private bool awaitingChoice;
@@ -60,6 +66,7 @@ public class GameManager : MonoBehaviour
             Debug.LogError("[Game] No levels assigned to the GameManager.");
             return;
         }
+        ScoreRecords.StartRun(levels);
         LoadLevel(0);
     }
 
@@ -71,7 +78,7 @@ public class GameManager : MonoBehaviour
             if (!awaitingChoice) return; // still showing the win message
 
             if (SpokenNumbers.IsRetry(text)) LoadLevel(levelIndex);
-            else if (SpokenNumbers.IsYes(text)) LoadLevel((levelIndex + 1) % levels.Length);
+            else if (SpokenNumbers.IsYes(text)) LoadLevel(levelIndex + 1);
             else Debug.Log($"[Game] {PromptText().Replace("\n", " ")}");
             return;
         }
@@ -110,7 +117,7 @@ public class GameManager : MonoBehaviour
             Instantiate(explosionPrefab, target.transform.position, Quaternion.identity);
         target.Hide();
 
-        SaveScore(Current, score);
+        ScoreRecords.RecordWin(Current, levelIndex, score);
         RefreshScoreBoard();
         Debug.Log($"WIN on {Current.displayName} (score {score})");
 
@@ -119,15 +126,26 @@ public class GameManager : MonoBehaviour
 
         yield return new WaitForSeconds(promptDelay);
 
+        if (IsLastLevel)
+        {
+            // All levels done: save the run and go to the end screen.
+            ScoreRecords.FinishRun();
+            const string done = "You finished every level!";
+            SetMessage(continuePrompt, done);
+            Debug.Log($"[Game] {done} Run total {ScoreRecords.RunTotal}.");
+            yield return new WaitForSeconds(endGameDelay);
+            UnityEngine.SceneManagement.SceneManager.LoadScene(endGameScene);
+            yield break;
+        }
+
         string prompt = PromptText();
         SetMessage(continuePrompt, prompt);
         Debug.Log($"[Game] {prompt.Replace("\n", " ")}");
         awaitingChoice = true;
     }
 
-    private string PromptText() => IsLastLevel
-        ? "That was the last level! Play again from Level 1?\nSay \"Yes\" to continue or \"Retry\" to replay this level."
-        : "Continue to the next level?\nSay \"Yes\" to continue or \"Retry\" to replay this level.";
+    private static string PromptText() =>
+        "Continue to the next level?\nSay \"Yes\" to continue or \"Retry\" to replay this level.";
 
     private string LevelLabel() => $"Level {levelIndex + 1}/{levels.Length}: {Current.displayName}";
 
@@ -138,7 +156,7 @@ public class GameManager : MonoBehaviour
         for (int i = 0; i < levels.Length; i++)
         {
             sb.Append($"\nLevel {i + 1}: ");
-            sb.Append(TryGetSavedScore(levels[i], out int last, out int best) ? $"{last} (best {best})" : "-");
+            sb.Append(ScoreRecords.TryGetLevelScore(levels[i], out int last, out int best) ? $"{last} (best {best})" : "-");
         }
         scoreBoard.SetLevelInfo(LevelLabel(), sb.ToString());
     }
@@ -148,25 +166,5 @@ public class GameManager : MonoBehaviour
         if (label == null) return;
         label.text = text ?? "";
         label.gameObject.SetActive(!string.IsNullOrEmpty(text));
-    }
-
-    // ---- Saved scores (PlayerPrefs, kept between play sessions) ----
-
-    private static string LastKey(LevelData l) => $"LevelScore_{l.name}_Last";
-    private static string BestKey(LevelData l) => $"LevelScore_{l.name}_Best";
-
-    private static void SaveScore(LevelData level, int score)
-    {
-        PlayerPrefs.SetInt(LastKey(level), score);
-        if (score > PlayerPrefs.GetInt(BestKey(level), int.MinValue))
-            PlayerPrefs.SetInt(BestKey(level), score);
-        PlayerPrefs.Save();
-    }
-
-    public static bool TryGetSavedScore(LevelData level, out int last, out int best)
-    {
-        last = PlayerPrefs.GetInt(LastKey(level), 0);
-        best = PlayerPrefs.GetInt(BestKey(level), 0);
-        return PlayerPrefs.HasKey(LastKey(level));
     }
 }
